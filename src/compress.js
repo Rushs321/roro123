@@ -1,34 +1,50 @@
 "use strict";
-import sharp from 'sharp';
-import { redirect } from './redirect.js';
+const sharp = require('sharp');
+const redirect = require('./redirect');
 
-export async function compressImg(request, reply, imgData) {
-    const { webp, grayscale, quality, originSize } = request.params;
-    const imgFormat = webp ? 'webp' : 'jpeg';
+const sharpStream = () => sharp({ animated: !process.env.NO_ANIMATE, unlimited: true });
+
+async function compress(req, reply) {
+    const format = req.params.webp ? 'webp' : 'jpeg';
+
+    let originSize = req.params.originSize || 0;
+    let chunks = [];
 
     try {
-        // Create the sharp instance and start the pipeline
-        let sharpInstance = sharp(imgData)
-            .grayscale(grayscale) // Apply grayscale conditionally
-            .toFormat(imgFormat, {
-                quality, // Use the provided quality
+        // Buffer the incoming data
+        for await (const chunk of req.raw) {
+            originSize += chunk.length;
+            chunks.push(chunk);
+        }
+
+        const buffer = Buffer.concat(chunks);
+
+        // Process the image with sharp
+        const { data, info } = await sharpStream()
+            .grayscale(req.params.grayscale)
+            .toFormat(format, {
+                quality: req.params.quality,
                 progressive: true,
-                optimizeScans: webp, // Optimize scans only for WebP
-                chromaSubsampling: webp ? '4:4:4' : '4:2:0', // Conditional chroma subsampling
-            });
+                optimizeScans: true,
+            })
+            .toBuffer({ resolveWithObject: true });
 
-        // Convert to buffer and get info
-        const { data, info } = await sharpInstance.toBuffer({ resolveWithObject: true });
-
-        // Send response with appropriate headers
-        reply
-            .header('content-type', `image/${imgFormat}`)
-            .header('content-length', info.size)
-            .header('x-original-size', originSize)
-            .header('x-bytes-saved', originSize - info.size)
-            .code(200)
-            .send(data);
-    } catch (error) {
-        return redirect(request, reply);
+        _sendResponse(null, data, info, format, req, reply, originSize);
+    } catch (err) {
+        _sendResponse(err, null, null, format, req, reply, originSize);
     }
 }
+
+function _sendResponse(err, output, info, format, req, reply, originSize) {
+    if (err || !info) return redirect(req, reply);
+
+    reply
+        .header('content-type', 'image/' + format)
+        .header('content-length', info.size)
+        .header('x-original-size', originSize)
+        .header('x-bytes-saved', originSize - info.size)
+        .code(200)
+        .send(output);
+}
+
+module.exports = compress;
